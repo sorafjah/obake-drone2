@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-<title>星霜魔法学校 おばけ退治ドローン</title>
+<title>ドローンおばけ退治</title>
 <style>
   @font-face {
     font-family: 'BIZ UDPGothic';
@@ -109,7 +109,7 @@
   <div id="toast"></div>
 </div>
 
-<button id="viewBtn">視点：追従</button>
+<button id="viewBtn">視点：ドローン</button>
 <button id="audioBtn" title="音の切り替え">🔊</button>
 
 <div id="gaugeLayer"></div>
@@ -127,8 +127,8 @@
 
 <div class="overlay" id="startScreen">
   <div class="panel">
-    <h1>星霜魔法学校</h1>
-    <div class="sub">— 夜の城に、おばけ退治ドローンで —</div>
+    <h1>ドローンおばけ退治</h1>
+    <div class="sub">— 星霜魔法学校の夜の城で —</div>
     <p>ドローンをそっと飛ばして、城のあちこちに<br>ういている おばけたちを、やさしい光で照らそう。<br>ライトはつけっぱなし。光をあて続けると、ふわっと消えていくよ。</p>
     <div class="controlHint">
       <div>🕹️左<br>のぼる・さがる<br>右で右旋回</div>
@@ -370,8 +370,8 @@ function buildWallX(z, x1, x2, height, doors=[], tint) {
     const mesh = new THREE.Mesh(new THREE.BoxGeometry(len, sg.h, WALL_T), stoneMat(len, sg.h, tint));
     mesh.position.set((sg.from+sg.to)/2, sg.y0 + sg.h/2, z);
     wallGroup.add(mesh);
-    // ドローンは空を飛ぶので、まぐさ(上部)も含めて全高で当たり判定を作る
-    addCollider(sg.from, sg.to, z-WALL_T/2, z+WALL_T/2);
+    // ドア上部の「まぐさ」(y0>0)は当たり判定に含めない(2D判定なのでドアが塞がってしまうため)
+    if (sg.y0 === 0) addCollider(sg.from, sg.to, z-WALL_T/2, z+WALL_T/2);
   }
 }
 function buildWallZ(x, z1, z2, height, doors=[], tint) {
@@ -380,7 +380,7 @@ function buildWallZ(x, z1, z2, height, doors=[], tint) {
     const mesh = new THREE.Mesh(new THREE.BoxGeometry(WALL_T, sg.h, len), stoneMat(len, sg.h, tint));
     mesh.position.set(x, sg.y0 + sg.h/2, (sg.from+sg.to)/2);
     wallGroup.add(mesh);
-    addCollider(x-WALL_T/2, x+WALL_T/2, sg.from, sg.to);
+    if (sg.y0 === 0) addCollider(x-WALL_T/2, x+WALL_T/2, sg.from, sg.to);
   }
 }
 
@@ -825,17 +825,43 @@ const drone = {
    おばけ (高さランダム)
 ========================================================= */
 const ghostGeo = new THREE.SphereGeometry(0.5, 16, 12);
+const ghostTailGeo = new THREE.SphereGeometry(1, 8, 6);
 function makeGhostMesh() {
   const g = new THREE.Group();
+
+  // 本体: より透明感を出し、発光を強める
   const body = new THREE.Mesh(ghostGeo, new THREE.MeshStandardMaterial({
-    color:0xe9e4ff, transparent:true, opacity:0.82, emissive:0x8866cc, emissiveIntensity:0.35, roughness:0.6 }));
-  body.scale.set(1, 1.25, 1); g.add(body);
+    color:0xd8ceff, transparent:true, opacity:0.5, emissive:0x9a7ae0, emissiveIntensity:0.6, roughness:0.35 }));
+  body.scale.set(1, 1.2, 1); g.add(body);
+
+  // 目(前方の目印)
   const eyeGeo = new THREE.SphereGeometry(0.07, 8, 8);
   const eyeMat = new THREE.MeshBasicMaterial({ color:0x2a2040, transparent:true, opacity:1 });
   const eyeL = new THREE.Mesh(eyeGeo, eyeMat); eyeL.position.set(-0.16, 0.15, 0.42);
   const eyeR = new THREE.Mesh(eyeGeo, eyeMat); eyeR.position.set(0.16, 0.15, 0.42);
   g.add(eyeL, eyeR);
+
+  // しっぽ(目と反対側=後方にたなびくウィスプ): 卵型にならないよう、前後左右どこから見てもおばけと分かるように
+  const tailSegments = [];
+  const tailSpecs = [ { z:-0.30, y:-0.04, s:0.30 }, { z:-0.52, y:-0.14, s:0.22 }, { z:-0.70, y:-0.24, s:0.14 } ];
+  for (const spec of tailSpecs) {
+    const seg = new THREE.Mesh(ghostTailGeo, new THREE.MeshStandardMaterial({
+      color:0xd8ceff, transparent:true, opacity:0.4, emissive:0x9a7ae0, emissiveIntensity:0.45, roughness:0.5 }));
+    seg.scale.setScalar(spec.s);
+    seg.position.set(0, spec.y, spec.z);
+    seg.userData.baseX = 0; seg.userData.baseY = spec.y; seg.userData.baseZ = spec.z;
+    g.add(seg);
+    tailSegments.push(seg);
+  }
+
+  // 発光スプライト(常にカメラ正面を向くので、どの角度から見ても光って見える)
+  const glow = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: TEX.glowPurple, blending: THREE.AdditiveBlending, depthWrite:false, transparent:true, opacity:0.5 }));
+  glow.scale.set(1.7, 1.7, 1); glow.position.set(0, 0.05, -0.1);
+  g.add(glow);
+
   g.userData.isGhost = true;
+  g.userData.tailSegments = tailSegments;
   return g;
 }
 
@@ -1103,7 +1129,7 @@ document.addEventListener('gesturestart', e => e.preventDefault());
 /* =========================================================
    視点 (追従 / ドローン一人称)
 ========================================================= */
-let viewMode = 'follow'; // 'follow' | 'fpv'
+let viewMode = 'fpv'; // 'follow' | 'fpv' ※デフォルトはドローン視点
 viewBtn.addEventListener('click', () => {
   viewMode = (viewMode === 'follow') ? 'fpv' : 'follow';
   viewBtn.textContent = (viewMode === 'follow') ? '視点：追従' : '視点：ドローン';
@@ -1265,6 +1291,15 @@ function stepGame(dt) {
     g.group.position.y += Math.sin(g.bobPhase)*0.003;
     g.group.rotation.y += (Math.atan2(dir.x, dir.z) - g.group.rotation.y)*0.05;
 
+    // しっぽ(ウィスプ)をゆらゆら揺らす
+    const tail = g.group.userData.tailSegments;
+    if (tail) {
+      tail.forEach((seg, i) => {
+        seg.position.x = seg.userData.baseX + Math.sin(elapsed*2.0 + g.bobPhase + i*0.9)*(0.06 + i*0.03);
+        seg.position.y = seg.userData.baseY + Math.sin(elapsed*1.5 + g.bobPhase + i*0.6)*0.03;
+      });
+    }
+
     const toG = g.group.position.clone().sub(droneGroup.position);
     const d = toG.length();
     let lit = false;
@@ -1275,11 +1310,11 @@ function stepGame(dt) {
     }
     if (lit) {
       g.lightTime += dt;
-      g.group.children[0].material.emissiveIntensity = 0.35 + Math.min(1, g.lightTime/DEFEAT_TIME)*1.2;
+      g.group.children[0].material.emissiveIntensity = 0.6 + Math.min(1, g.lightTime/DEFEAT_TIME)*1.3;
       if (g.lightTime >= DEFEAT_TIME) defeatGhost(g);
     } else if (g.lightTime > 0) {
       g.lightTime = Math.max(0, g.lightTime - dt*LIGHT_DECAY_MUL);
-      g.group.children[0].material.emissiveIntensity = 0.35 + Math.min(1, g.lightTime/DEFEAT_TIME)*1.2;
+      g.group.children[0].material.emissiveIntensity = 0.6 + Math.min(1, g.lightTime/DEFEAT_TIME)*1.3;
     }
   });
 
