@@ -827,16 +827,37 @@ const drone = {
 const ghostGeo = new THREE.SphereGeometry(0.5, 16, 12);
 const ghostTailGeo = new THREE.SphereGeometry(1, 8, 6);
 
-// 「今まさに照らしている」ことを分かりやすくするためのリング状インジケータ
-function makeRingTexture() {
+// 「今まさに照らしている」ことを分かりやすくするためのきらめき(スパークル)テクスチャ
+function makeSparkleTexture() {
   const c = document.createElement('canvas'); c.width = c.height = 128;
   const ctx = c.getContext('2d');
-  ctx.strokeStyle = 'rgba(255,255,255,1)';
-  ctx.lineWidth = 9;
-  ctx.beginPath(); ctx.arc(64, 64, 48, 0, Math.PI*2); ctx.stroke();
+  const cx = 64, cy = 64;
+  // やわらかい光暈(グロー)
+  const glow = ctx.createRadialGradient(cx, cy, 0, cx, cy, 60);
+  glow.addColorStop(0, 'rgba(255,250,220,0.9)');
+  glow.addColorStop(0.5, 'rgba(255,230,160,0.35)');
+  glow.addColorStop(1, 'rgba(255,230,160,0)');
+  ctx.fillStyle = glow; ctx.fillRect(0, 0, 128, 128);
+  // 四芒星(キラッとした光の粒)
+  function star(x, y, r, alpha) {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.fillStyle = `rgba(255,255,255,${alpha})`;
+    ctx.beginPath();
+    ctx.moveTo(0, -r); ctx.quadraticCurveTo(r*0.18, -r*0.18, r, 0);
+    ctx.quadraticCurveTo(r*0.18, r*0.18, 0, r);
+    ctx.quadraticCurveTo(-r*0.18, r*0.18, -r, 0);
+    ctx.quadraticCurveTo(-r*0.18, -r*0.18, 0, -r);
+    ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+  star(cx, cy, 42, 0.95);
+  star(cx, cy, 20, 1);
+  star(cx-30, cy-22, 10, 0.8);
+  star(cx+26, cy+18, 8, 0.7);
   return new THREE.CanvasTexture(c);
 }
-const TEX_RING = makeRingTexture();
+const TEX_SPARKLE = makeSparkleTexture();
 function makeGhostMesh() {
   const g = new THREE.Group();
 
@@ -871,15 +892,28 @@ function makeGhostMesh() {
   glow.scale.set(1.7, 1.7, 1); glow.position.set(0, 0.05, -0.1);
   g.add(glow);
 
-  // 照射中リング: ライトが当たっている間だけ明るく脈打つ(「今照らしている」を分かりやすく)
-  const targetRing = new THREE.Sprite(new THREE.SpriteMaterial({
-    map: TEX_RING, color:0xfff3b0, blending: THREE.AdditiveBlending, depthWrite:false, transparent:true, opacity:0 }));
-  targetRing.scale.set(1.4, 1.4, 1); targetRing.position.set(0, 0.05, 0);
-  g.add(targetRing);
+  // 照射中スパークル: ライトが当たっている間だけ、まわりにきらきらとした光の粒が浮かぶ
+  const sparkles = [];
+  const sparkleSpecs = [
+    { x:0.36, y:0.32, z:0.16, ph:0.0 },
+    { x:-0.34, y:0.16, z:0.24, ph:1.3 },
+    { x:0.16, y:0.48, z:-0.12, ph:2.6 },
+    { x:-0.22, y:0.42, z:-0.22, ph:4.0 },
+    { x:0.02, y:0.58, z:0.06, ph:5.2 },
+  ];
+  for (const spec of sparkleSpecs) {
+    const spr = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: TEX_SPARKLE, color:0xfff3c0, blending: THREE.AdditiveBlending, depthWrite:false, transparent:true, opacity:0 }));
+    spr.scale.set(0.4, 0.4, 1);
+    spr.position.set(spec.x, spec.y, spec.z);
+    spr.userData.baseX = spec.x; spr.userData.baseY = spec.y; spr.userData.baseZ = spec.z; spr.userData.phase = spec.ph;
+    g.add(spr);
+    sparkles.push(spr);
+  }
 
   g.userData.isGhost = true;
   g.userData.tailSegments = tailSegments;
-  g.userData.targetRing = targetRing;
+  g.userData.sparkles = sparkles;
   return g;
 }
 
@@ -901,17 +935,32 @@ function randomGhostConfig(room) {
   return { path:[a, b], speed: 0.7 + Math.random()*0.7 };
 }
 
+function shuffled(arr) {
+  const a = arr.slice();
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+}
+function pickRandomRooms(count) {
+  const names = rooms.map(r => r.name);
+  const picked = [];
+  let pool = shuffled(names);
+  while (picked.length < count) {
+    if (pool.length === 0) pool = shuffled(names); // 全部屋を使い切ったらもう一巡(重複はここから)
+    picked.push(pool.pop());
+  }
+  return picked;
+}
+
 function spawnGhostsForStage(stageIdx) {
   ghosts.forEach(g => scene.remove(g.group));
   ghosts = [];
   ghostFades.length = 0;
-  // ステージ1: 4体(廊下/大広間/図書室/宿舎)、ステージ2: 7体(全部屋+α)
-  let roomPlan;
-  if (stageIdx === 0) {
-    roomPlan = ['廊下','大広間','図書室','宿舎'];
-  } else {
-    roomPlan = ['廊下','大広間','図書室','宿舎','魔法薬学の教室','呪文学の教室','中庭'];
-  }
+  // ステージ1: 4体、ステージ2: 7体。どの部屋に出るかも毎回ランダム
+  const count = (stageIdx === 0) ? 4 : 7;
+  const roomPlan = pickRandomRooms(count);
   for (const rn of roomPlan) {
     const room = rooms.find(r => r.name === rn);
     if (!room) continue;
@@ -1359,16 +1408,23 @@ function stepGame(dt) {
       g.group.children[0].material.emissiveIntensity = 0.6 + Math.min(1, g.lightTime/DEFEAT_TIME)*1.6;
     }
 
-    // 照射中リング: 当たっている間は明るく脈打ち、外れるとすっと消える
-    const ring = g.group.userData.targetRing;
-    if (ring) {
-      if (lit) {
-        const pulse = 1.35 + Math.sin(elapsed*9)*0.18;
-        ring.scale.set(pulse, pulse, 1);
-        ring.material.opacity = 0.6 + Math.sin(elapsed*9)*0.25;
-      } else {
-        ring.material.opacity = Math.max(0, ring.material.opacity - dt*2.5);
-      }
+    // 照射中スパークル: 当たっている間はまわりにきらきらとした光の粒が浮かび、外れるとすっと消える
+    const sparkles = g.group.userData.sparkles;
+    if (sparkles) {
+      sparkles.forEach((spr) => {
+        const ph = spr.userData.phase;
+        if (lit) {
+          const twinkle = 0.35 + 0.65*Math.abs(Math.sin(elapsed*6 + ph));
+          spr.material.opacity = twinkle;
+          const s = 0.28 + 0.20*Math.abs(Math.sin(elapsed*6 + ph));
+          spr.scale.set(s, s, 1);
+          spr.position.x = spr.userData.baseX + Math.sin(elapsed*1.3 + ph)*0.07;
+          spr.position.y = spr.userData.baseY + Math.sin(elapsed*1.7 + ph*1.3)*0.06 + Math.min(1, g.lightTime/DEFEAT_TIME)*0.05;
+          spr.position.z = spr.userData.baseZ + Math.cos(elapsed*1.3 + ph)*0.07;
+        } else if (spr.material.opacity > 0) {
+          spr.material.opacity = Math.max(0, spr.material.opacity - dt*2.5);
+        }
+      });
     }
   });
 
@@ -1443,10 +1499,11 @@ window.__test = {
   }),
   getGhostHeights: () => ghosts.map(g => g.group.position.y),
   getGhostPositions: () => ghosts.map(g => ({ dead: g.dead, pos: g.group.position.toArray() })),
-  getGhostRingOpacity: (index=0) => {
+  getGhostSparkleOpacity: (index=0) => {
     const g = ghosts.filter(gg=>!gg.dead)[index];
-    if (!g) return null;
-    return g.group.userData.targetRing ? g.group.userData.targetRing.material.opacity : null;
+    if (!g || !g.group.userData.sparkles) return null;
+    const arr = g.group.userData.sparkles.map(s => s.material.opacity);
+    return Math.max(...arr);
   },
   getGhostRooms: () => ghosts.map(g => g.roomName),
   forceDefeatAll: () => { ghosts.forEach(g=>{ if(!g.dead) defeatGhost(g); }); },
